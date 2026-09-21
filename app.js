@@ -16,6 +16,7 @@
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[c]);
   const clone = o => JSON.parse(JSON.stringify(o));
+  const noteKey = name => String(name || '').trim().toLocaleLowerCase('fi-FI').replace(/\s+/g, ' ');
 
   const fresh = () => ({
     settings: { effortType: 'RIR', unit: 'kg', restSeconds: 120 },
@@ -43,6 +44,7 @@
       }]
     }],
     workouts: [],
+    globalExerciseNotes: {},
     active: null
   });
 
@@ -169,6 +171,7 @@
         slotId: s.id,
         name: s.name,
         sup: s.sup,
+        note: s.note ?? '',
         sets: s.sets.map(x => ({
           id: uid('ws'),
           type: x.type || 'normal',
@@ -205,6 +208,25 @@
     const effort = state.settings.effortType;
     const body = w.exercises.map(ex => {
       const p = prev(w, ex);
+      const key = noteKey(ex.name);
+      const globalNote = state.globalExerciseNotes?.[key] ?? '';
+      const noteHtml = w.templateId
+        ? `<div class="exercise-notes">
+            <div class="note-box">
+              <div class="note-head"><label>Template-muistiinpano</label><button class="note-clear" data-clear-template-note type="button">Poista</button></div>
+              <textarea data-template-note rows="2" placeholder="Kirjoita muistiinpano tälle liikkeelle tässä templatessa...">${esc(ex.note ?? '')}</textarea>
+            </div>
+            ${globalNote ? `<div class="note-box global-note">
+              <div class="note-head"><label>Yleinen muistiinpano</label><button class="note-clear" data-clear-global-note type="button">Poista</button></div>
+              <textarea data-global-note rows="2">${esc(globalNote)}</textarea>
+            </div>` : ''}
+          </div>`
+        : `<div class="exercise-notes">
+            <div class="note-box global-note">
+              <div class="note-head"><label>Muistiinpano (näkyy kaikissa treeneissä)</label><button class="note-clear" data-clear-global-note type="button">Poista</button></div>
+              <textarea data-global-note rows="2" placeholder="Kirjoita yleinen muistiinpano tälle liikkeelle...">${esc(globalNote)}</textarea>
+            </div>
+          </div>`;
       const rows = ex.sets.map((s, i) => `
         <div class="setrow" data-ex="${ex.id}" data-set="${s.id}">
           <button class="type" data-type>${tlabel(s.type)}</button>
@@ -216,11 +238,12 @@
           <button class="setdelete" data-del-set aria-label="Poista sarja">×</button>
         </div>`).join('');
 
-      return `<section class="card slot">
+      return `<section class="card slot" data-ex="${ex.id}">
         <div class="row">
           <div><h2>${esc(ex.name)}</h2>${ex.sup ? `<div class="sup">SUPERSET ${esc(ex.sup)}</div>` : ''}</div>
           <button class="btn small danger" data-del-ex="${ex.id}">Poista</button>
         </div>
+        ${noteHtml}
         <div class="sethead"><div>T</div><div>Ed.</div><div>${state.settings.unit}</div><div>Reps</div><div>${effort}</div><div></div><div></div></div>
         ${rows}
         <div class="actions">
@@ -274,7 +297,50 @@
       tick();
     };
 
-    $$('.setrow').forEach(r => {
+    $('.slot').forEach(el => {
+      const ex = w.exercises.find(x => x.id === el.dataset.ex);
+      if (!ex) return;
+
+      const templateArea = $('[data-template-note]', el);
+      if (templateArea) {
+        templateArea.oninput = async e => {
+          ex.note = e.target.value;
+          const t = state.templates.find(x => x.id === w.templateId);
+          const slot = t?.slots.find(x => x.id === ex.slotId);
+          if (slot) slot.note = ex.note;
+          await save();
+        };
+        const clearTemplate = $('[data-clear-template-note]', el);
+        if (clearTemplate) clearTemplate.onclick = async () => {
+          ex.note = '';
+          templateArea.value = '';
+          const t = state.templates.find(x => x.id === w.templateId);
+          const slot = t?.slots.find(x => x.id === ex.slotId);
+          if (slot) slot.note = '';
+          await save();
+        };
+      }
+
+      const globalArea = $('[data-global-note]', el);
+      if (globalArea) {
+        const key = noteKey(ex.name);
+        const saveGlobal = async () => {
+          const value = globalArea.value;
+          if (value.trim()) state.globalExerciseNotes[key] = value;
+          else delete state.globalExerciseNotes[key];
+          await save();
+        };
+        globalArea.oninput = saveGlobal;
+        const clearGlobal = $('[data-clear-global-note]', el);
+        if (clearGlobal) clearGlobal.onclick = async () => {
+          globalArea.value = '';
+          delete state.globalExerciseNotes[key];
+          await save();
+        };
+      }
+    });
+
+    $('.setrow').forEach(r => {
       const ex = w.exercises.find(x => x.id === r.dataset.ex);
       const s = ex.sets.find(x => x.id === r.dataset.set);
       $$('input', r).forEach(i => i.oninput = async e => {
@@ -348,6 +414,7 @@
         slotId: uid('adhoc'),
         name: n,
         sup: $('#es').value.trim().toUpperCase(),
+        note: '',
         sets: [{ id: uid('ws'), type: 'normal', weight: '', reps: '', effort: '', done: false }]
       });
       await save();
@@ -414,6 +481,7 @@
           id: e.slotId,
           name: e.name,
           sup: e.sup,
+          note: e.note ?? '',
           sets: e.sets.map(s => ({ id: uid('x'), type: s.type, w: s.weight, r: s.reps, e: s.effort }))
         }));
       }
@@ -569,6 +637,7 @@
           state = x;
           state.settings = state.settings || {};
           if (!('restSeconds' in state.settings)) state.settings.restSeconds = 120;
+          state.globalExerciseNotes = state.globalExerciseNotes || {};
           await save();
           tab = 'templates';
           render();
@@ -687,6 +756,7 @@
       state = await get(KEY) || fresh();
       state.settings = state.settings || {};
       if (!('restSeconds' in state.settings)) state.settings.restSeconds = 120;
+      state.globalExerciseNotes = state.globalExerciseNotes || {};
       if (state.active && !aw()) state.active = null;
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
       render();
