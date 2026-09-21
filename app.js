@@ -18,7 +18,7 @@
   const clone = o => JSON.parse(JSON.stringify(o));
 
   const fresh = () => ({
-    settings: { effortType: 'RIR', unit: 'kg' },
+    settings: { effortType: 'RIR', unit: 'kg', restSeconds: 120 },
     templates: [{
       id: uid('t'),
       name: 'Push A (esimerkki)',
@@ -213,6 +213,7 @@
           <input inputmode="numeric" data-f="reps" value="${esc(s.reps)}">
           <input inputmode="decimal" data-f="effort" value="${esc(s.effort)}">
           <button class="check ${s.done ? 'done' : ''}" data-done>${s.done ? '✓' : '○'}</button>
+          <button class="setdelete" data-del-set aria-label="Poista sarja">×</button>
         </div>`).join('');
 
       return `<section class="card slot">
@@ -220,7 +221,7 @@
           <div><h2>${esc(ex.name)}</h2>${ex.sup ? `<div class="sup">SUPERSET ${esc(ex.sup)}</div>` : ''}</div>
           <button class="btn small danger" data-del-ex="${ex.id}">Poista</button>
         </div>
-        <div class="sethead"><div>T</div><div>Ed.</div><div>${state.settings.unit}</div><div>Reps</div><div>${effort}</div><div></div></div>
+        <div class="sethead"><div>T</div><div>Ed.</div><div>${state.settings.unit}</div><div>Reps</div><div>${effort}</div><div></div><div></div></div>
         ${rows}
         <div class="actions">
           <button class="btn small" data-add="${ex.id}">+ Sarja</button>
@@ -234,14 +235,44 @@
         <div><h1>${esc(w.templateName)}</h1><div class="mini" id="clock"></div></div>
         <button class="btn primary" id="finish">Lopeta</button>
       </header>
+      <div class="restbar" id="restbar" ${w.restUntil ? '' : 'hidden'}>
+        <span>Tauko</span>
+        <b id="restclock"></b>
+        <button id="rest-stop" aria-label="Lopeta taukoajastin">×</button>
+      </div>
       <main class="page">
         ${body || '<div class="card"><b>Tyhjä treeni</b><div class="mini">Lisää ensimmäinen liike alta.</div></div>'}
         <button class="btn block" id="add-ex">+ Lisää liike</button>
       </main>`;
 
-    const tick = () => $('#clock') && ($('#clock').textContent = dur(Date.now() - w.startedAt));
+    let restExpired = false;
+    const tick = () => {
+      const clock = $('#clock');
+      if (clock) clock.textContent = dur(Date.now() - w.startedAt);
+      const bar = $('#restbar');
+      const restClock = $('#restclock');
+      if (w.restUntil && w.restUntil > Date.now()) {
+        if (bar) bar.hidden = false;
+        const left = Math.ceil((w.restUntil - Date.now()) / 1000);
+        if (restClock) restClock.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+      } else if (w.restUntil) {
+        w.restUntil = null;
+        if (bar) bar.hidden = true;
+        if (!restExpired) {
+          restExpired = true;
+          save().catch(() => {});
+        }
+      } else if (bar) {
+        bar.hidden = true;
+      }
+    };
     tick();
     timer = setInterval(tick, 1000);
+    $('#rest-stop').onclick = async () => {
+      w.restUntil = null;
+      await save();
+      tick();
+    };
 
     $$('.setrow').forEach(r => {
       const ex = w.exercises.find(x => x.id === r.dataset.ex);
@@ -251,13 +282,24 @@
         await save();
       });
       $('[data-done]', r).onclick = async () => {
+        const wasDone = s.done;
         s.done = !s.done;
+        if (!wasDone && s.done) {
+          const seconds = Math.max(0, Number(state.settings.restSeconds ?? 120) || 0);
+          if (seconds > 0) w.restUntil = Date.now() + seconds * 1000;
+        }
         await save();
         renderKeep();
       };
       $('[data-type]', r).onclick = async () => {
         const a = ['normal', 'warmup', 'drop', 'backoff', 'failure'];
         s.type = a[(a.indexOf(s.type) + 1) % a.length];
+        await save();
+        renderKeep();
+      };
+      $('[data-del-set]', r).onclick = async () => {
+        if (!confirm('Poistetaanko tämä sarja?')) return;
+        ex.sets = ex.sets.filter(x => x.id !== s.id);
         await save();
         renderKeep();
       };
@@ -326,6 +368,7 @@
       $('#save-blank').onclick = async () => {
         w.status = 'completed';
         w.finishedAt = Date.now();
+        w.restUntil = null;
         state.active = null;
         await save();
         closeSheet();
@@ -349,6 +392,7 @@
       const t = state.templates.find(x => x.id === w.templateId);
       w.status = 'completed';
       w.finishedAt = Date.now();
+      w.restUntil = null;
       state.active = null;
 
       if (t && mode === 'loads') {
@@ -481,6 +525,11 @@
         <div class="card stack">
           <div class="field"><label>Intensiteetti</label><select id="eff"><option ${state.settings.effortType === 'RIR' ? 'selected' : ''}>RIR</option><option ${state.settings.effortType === 'RPE' ? 'selected' : ''}>RPE</option></select></div>
           <div class="field"><label>Yksikkö</label><select id="unit"><option ${state.settings.unit === 'kg' ? 'selected' : ''}>kg</option><option ${state.settings.unit === 'lb' ? 'selected' : ''}>lb</option></select></div>
+          <div class="field">
+            <label>Taukoajastin (sekuntia)</label>
+            <input id="rest-seconds" type="number" inputmode="numeric" min="0" max="1800" step="5" value="${esc(state.settings.restSeconds ?? 120)}">
+            <div class="mini">0 = pois päältä. Ajastin käynnistyy, kun sarja merkitään tehdyksi.</div>
+          </div>
         </div>
         <div class="card stack">
           <button class="btn" id="export">Vie JSON-varmuuskopio</button>
@@ -493,6 +542,14 @@
     bindNav();
     $('#eff').onchange = async e => { state.settings.effortType = e.target.value; await save(); };
     $('#unit').onchange = async e => { state.settings.unit = e.target.value; await save(); };
+    $('#rest-seconds').onchange = async e => {
+      let n = Math.round(Number(e.target.value));
+      if (!Number.isFinite(n)) n = 120;
+      n = Math.min(1800, Math.max(0, n));
+      state.settings.restSeconds = n;
+      e.target.value = n;
+      await save();
+    };
     $('#export').onclick = () => {
       const a = document.createElement('a');
       const u = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }));
@@ -510,6 +567,8 @@
         if (!x.templates || !x.workouts) throw Error('Virheellinen tiedosto');
         if (confirm('Korvataanko nykyiset tiedot?')) {
           state = x;
+          state.settings = state.settings || {};
+          if (!('restSeconds' in state.settings)) state.settings.restSeconds = 120;
           await save();
           tab = 'templates';
           render();
@@ -626,6 +685,8 @@
     try {
       db = await openDb();
       state = await get(KEY) || fresh();
+      state.settings = state.settings || {};
+      if (!('restSeconds' in state.settings)) state.settings.restSeconds = 120;
       if (state.active && !aw()) state.active = null;
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
       render();
